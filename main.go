@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"google.golang.org/api/iam/v1"
 
@@ -17,96 +16,34 @@ import (
 	"google.golang.org/api/cloudresourcemanager/v3"
 )
 
-// PubSubMessage is the payload of a Pub/Sub event.
-// See the documentation for more details:
-// https://cloud.google.com/pubsub/docs/reference/rest/v1/PubsubMessage
-type PubSubMessage struct {
-	Data []byte `json:"data"`
-}
+/* TODO REFACTORING
 
-type SetIAMPolicyEvent struct {
-	ProtoPayload struct {
-		Type   string `json:"@type"`
-		Status struct {
-		} `json:"status"`
-		AuthenticationInfo struct {
-			PrincipalEmail string `json:"principalEmail"`
-		} `json:"authenticationInfo"`
-		RequestMetadata struct {
-			CallerIP                string `json:"callerIp"`
-			CallerSuppliedUserAgent string `json:"callerSuppliedUserAgent"`
-			RequestAttributes       struct {
-			} `json:"requestAttributes"`
-			DestinationAttributes struct {
-			} `json:"destinationAttributes"`
-		} `json:"requestMetadata"`
-		ServiceName       string `json:"serviceName"`
-		MethodName        string `json:"methodName"`
-		AuthorizationInfo []struct {
-			Resource           string `json:"resource"`
-			Permission         string `json:"permission"`
-			Granted            bool   `json:"granted"`
-			ResourceAttributes struct {
-				Service string `json:"service"`
-				Name    string `json:"name"`
-				Type    string `json:"type"`
-			} `json:"resourceAttributes"`
-		} `json:"authorizationInfo"`
-		ResourceName string `json:"resourceName"`
-		ServiceData  struct {
-			Type        string `json:"@type"`
-			PolicyDelta struct {
-				BindingDeltas []struct {
-					Action string `json:"action"`
-					Role   string `json:"role"`
-					Member string `json:"member"`
-				} `json:"bindingDeltas"`
-			} `json:"policyDelta"`
-		} `json:"serviceData"`
-		Request struct {
-			Resource string `json:"resource"`
-			Type     string `json:"@type"`
-			Policy   struct {
-				Etag     string `json:"etag"`
-				Bindings []struct {
-					Members []string `json:"members"`
-					Role    string   `json:"role"`
-				} `json:"bindings"`
-			} `json:"policy"`
-			UpdateMask string `json:"updateMask"`
-		} `json:"request"`
-		Response struct {
-			Type     string `json:"@type"`
-			Etag     string `json:"etag"`
-			Bindings []struct {
-				Members []string `json:"members"`
-				Role    string   `json:"role"`
-			} `json:"bindings"`
-		} `json:"response"`
-	} `json:"protoPayload"`
-	InsertID string `json:"insertId"`
-	Resource struct {
-		Type   string `json:"type"`
-		Labels struct {
-			ProjectID string `json:"project_id,omitempty"`
-			FolderID  string `json:"folder_id,omitempty"`
-		} `json:"labels"`
-	} `json:"resource"`
-	Timestamp        time.Time `json:"timestamp"`
-	Severity         string    `json:"severity"`
-	LogName          string    `json:"logName"`
-	ReceiveTimestamp time.Time `json:"receiveTimestamp"`
-}
+Separate into different packages.
+
+There are a couple basic processes that this does:
+1. Identify sus serviceAccounts
+2. Get project/folders in the org
+3. Determine the tags on the resource(s)
+4. (TBD) Remove the serviceAccount(s) from the IAM policy
+
+
+
+Look for areas to simplify the approach, implement methods, rename vars to be more
+readable and avoid confusion w/ similarly named vars (may be aided by separating into diff packages).
+
+
+
+*/
 
 var (
 	event     SetIAMPolicyEvent
-	folderIDs = make(map[string]bool)
-	orgID     string
+	folderIDs        = make(map[string]bool)
+	orgID     string = "218422761942"
 )
 
 // unmarshallMessage unmarshalles the Pub/Sub message into the SetIAMPolicy struct.
 func UnmarshallMessage(ctx context.Context, msg PubSubMessage) error {
-
+	log.Println("inside UnmarshalMessage()")
 	err := json.Unmarshal(msg.Data, &event)
 	if err != nil {
 		log.Println(fmt.Errorf("error unmarshalling message: %v", msg.Data))
@@ -125,6 +62,7 @@ func UnmarshallMessage(ctx context.Context, msg PubSubMessage) error {
 // compareServiceAccounts gets and compares the service accounts in the IAM Policy
 // and the serviceAccounts in the project where the binding occurred.
 func compareServiceAccounts(ctx context.Context, event SetIAMPolicyEvent) ([]string, error) {
+	log.Println("inside compareServiceAccounts()")
 	var policyServiceAccounts []string
 	var projectServiceAccounts []string
 	var susServiceAccounts []string
@@ -134,15 +72,12 @@ func compareServiceAccounts(ctx context.Context, event SetIAMPolicyEvent) ([]str
 
 	for _, v := range event.ProtoPayload.Response.Bindings {
 		for _, v := range v.Members {
-			if strings.Contains(v, "serviceAccount") {
+			if strings.Contains(v, "serviceAccount") && !strings.Contains(v, "service-") {
 				a := strings.Split(v, ":")[1]
 				policyServiceAccounts = append(policyServiceAccounts, a)
 			}
 		}
 	}
-
-	// TODO need to eliminate service agents that aren't technically in the project but are associated with the project
-	// we shouldn't count these as 'sus' accounts.
 
 	// Create an IAM svc
 	iamsvc, err := iam.NewService(ctx)
@@ -176,20 +111,17 @@ func compareServiceAccounts(ctx context.Context, event SetIAMPolicyEvent) ([]str
 
 //getAncestors returns the ancestors for the resource where the binding occurred.
 func getAncestors(ctx context.Context) (map[string]string, error) {
+	log.Println("inside getAncestors()")
 	ancestors := make(map[string]string)
 
-	// TODO getAncestry for a folder and not just a project.
-	// if proejctid == ""{cloudresourcemanagerService.Folders.GetAncestry}
-	// we would need to first check what type of event we have and have two
-	// structs; one for each event to unmarshall the data properly.
-
 	cloudresourcemanagerService, err := crmv1.NewService(ctx)
+	ancestryRequest := crmv1.GetAncestryRequest{}
 	if err != nil {
 		return nil, err
 	}
+
 	// GetAncestry wants projectID in the format {project-id}
 	projectID := event.Resource.Labels.ProjectID
-	ancestryRequest := crmv1.GetAncestryRequest{}
 
 	listProjects := cloudresourcemanagerService.Projects.GetAncestry(projectID, &ancestryRequest)
 	req, err := listProjects.Do()
@@ -211,7 +143,7 @@ func getAncestors(ctx context.Context) (map[string]string, error) {
 //listProjects returns a list of the projects within the folder hierarch of the resource where
 // the binding occurred.
 func getAncestorProjects(ctx context.Context, ancestors map[string]string) ([]string, error) {
-
+	log.Println("inside getAncestorProjects()")
 	var filter []string
 	var project []*crmv1.Project
 	var projectIDs []string
@@ -248,6 +180,7 @@ func getAncestorProjects(ctx context.Context, ancestors map[string]string) ([]st
 // getServiceAccounts gets the service accounts in all the ancestors provided and compares them to the
 // serviceAccounts in the binding that were not found in the project where the binding occurred.
 func getAncestorServiceAccounts(ctx context.Context, projects []string, susServiceAccounts []string) ([]string, error) {
+	log.Println("inside getAncestorServiceA()")
 	var serviceAccounts []*iam.ServiceAccount
 	var projectID string
 	// Create an IAM svc
@@ -264,7 +197,6 @@ func getAncestorServiceAccounts(ctx context.Context, projects []string, susServi
 		// Get all the serviceAccounts in the project
 		list := iamsvc.Projects.ServiceAccounts.List(projectID)
 
-		// TODO This can return an error if the API is not enabled in the target project.Maybe check if API is enabled first.
 		resp, err := list.Do()
 		if err != nil {
 			log.Print(err)
@@ -292,7 +224,7 @@ func getAncestorServiceAccounts(ctx context.Context, projects []string, susServi
 // search the top level folders under the org node and
 // append to a list of folderIDs
 func getTopLevelFolders(ctx context.Context) (map[string]bool, error) {
-
+	log.Println("inside toplevelfolders()")
 	crms, err := crmv2.NewService(ctx)
 	folderSvc := crmv2.NewFoldersService(crms)
 	if err != nil {
@@ -315,6 +247,7 @@ func getTopLevelFolders(ctx context.Context) (map[string]bool, error) {
 
 // recursively search all folder ids under the top level folders
 func getAllFolders(ctx context.Context, folderIDs map[string]bool) (map[string]bool, error) {
+	log.Println("inside getallfolders()")
 	var complete bool
 
 	crms, err := crmv2.NewService(ctx)
@@ -359,7 +292,7 @@ func getAllFolders(ctx context.Context, folderIDs map[string]bool) (map[string]b
 
 //getAllProjects appends the project IDs for all projects in GCP org to a []strings.
 func getAllProjects(ctx context.Context, folderIDs map[string]bool) ([]string, error) {
-
+	log.Println("inside getAllProjects()")
 	var projectIDs []string
 	crms, err := crmv1.NewService(ctx)
 	if err != nil {
@@ -400,8 +333,22 @@ func getAllProjects(ctx context.Context, folderIDs map[string]bool) ([]string, e
 	return projectIDs, nil
 }
 
+// func getProjects(ctx context.Context) ([]string, error) {
+// 	var projectIDs []string
+// 	c, err := asset.NewClient(ctx)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("error building asset client %v", err)
+// 	}
+// 	var req *assetpb.SearchAllResourcesRequest
+// 	req.Scope
+// 	c.SearchAllResources(ctx)
+
+// 	return projectIDs, nil
+// }
+
 // getAllServiceAccounts gets all the service accounts in all projects in a GCP org.
 func getAllServiceAccounts(ctx context.Context, projects []string) (map[string][]string, error) {
+	log.Println("Inside getallserviceaccounts")
 	var value []string
 	serviceAccounts := make(map[string][]string)
 	// Create an IAM svc
@@ -434,7 +381,8 @@ func getAllServiceAccounts(ctx context.Context, projects []string) (map[string][
 	return serviceAccounts, nil
 }
 
-func serviceAccountProjectTag(serviceaccountproejctids map[string][]string, susServiceAccounts []string) {
+func serviceAccountProjectTag(serviceaccountproejctids map[string][]string, susServiceAccounts []string) ([]string, error) {
+	log.Println("inside serviceaccountProjectTag")
 	var projectIDs []string
 	var tagValues []string
 
@@ -459,13 +407,13 @@ func serviceAccountProjectTag(serviceaccountproejctids map[string][]string, susS
 	ctx := context.Background()
 	service, err := cloudresourcemanager.NewService(ctx)
 	if err != nil {
-		log.Println(err)
+		return nil, fmt.Errorf("error building resource manager service %v", err)
 	}
 
 	for _, projectID := range projectIDs {
 		req, err := service.TagBindings.List().Parent(projectID).Do()
 		if err != nil {
-			log.Println(err)
+			return nil, fmt.Errorf("error getting tags %v", err)
 		}
 
 		resp := req.TagBindings
@@ -480,12 +428,96 @@ func serviceAccountProjectTag(serviceaccountproejctids map[string][]string, susS
 			log.Printf("The tagValues do not match on the projects %v", projectIDs)
 		}
 	}
+	return susServiceAccounts, nil
+}
+
+func removeSusServiceAccounts(susServiceAccounts []string) error {
+	// Deleting the Service Account from the policy
+
+	/*
+	   Then we need to find that service account in the event body, and determine if it's the only member of a given role.
+	   If it's the only member of that role we can remove that entirely from  the []bindings, otherwise we just need to remove
+	   that service account from the []members within that []bindings to make a new setIAMPolicy request to the API.
+	   Note that this will be based on the resource (folder/projectFirst, we need to hold on to the service account in question.) where the event occurred since this is a part of the
+	   resource manager API and not the IAM API.
+
+	*/
+	log.Println("inside removeSusServiceAccounts()")
+	projectID := event.Resource.Labels.ProjectID
+	bindings := event.ProtoPayload.Request.Policy.Bindings
+
+	var setIAMPolicyRequest *cloudresourcemanager.SetIamPolicyRequest
+	var policy *cloudresourcemanager.Policy
+	var crmBinding *cloudresourcemanager.Binding
+
+	// this will turn any member in the policy that is a susServiceAccount to a "". Unsure if this will be accepted by the API.
+	for _, v := range bindings {
+		for i, member := range v.Members {
+			if member == susServiceAccounts[i] {
+				log.Println(member)
+				v.Members[i] = ""
+				log.Println(member)
+
+				crmBinding.Members = v.Members
+				crmBinding.Role = v.Role
+
+				policy.Bindings = []*cloudresourcemanager.Binding{crmBinding}
+				policy.Version = 3
+			}
+
+		}
+	}
+
+	setIAMPolicyRequest.Policy = policy
+	// build resource manager policy object from bindings
+	// build request to set IAM policy, send request.
+
+	ctx := context.Background()
+	svc, err := cloudresourcemanager.NewService(ctx)
+	if err != nil {
+		return fmt.Errorf("error creating resource manager servicer: %v", err)
+	}
+	prjSvc := cloudresourcemanager.NewProjectsService(svc)
+	req := prjSvc.SetIamPolicy(fmt.Sprintf("projects/%v", projectID), setIAMPolicyRequest)
+
+	res, err := req.Do()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(res.HTTPStatusCode)
+	return nil
 }
 
 func ProcessFolderEvent(ctx context.Context) error {
-	//TODO implement the right calls to get the ancestors, tags, etc. for when there is a setIamPolicy event on a folder.
-	// May require restructuring the code to make this work efficiently.
+	sa, err := compareServiceAccounts(ctx, event)
+	if err != nil {
+		return fmt.Errorf("error comparing service accounts: %v", err)
+	}
 
+	if len(sa) != 0 {
+
+		tlf, err := getTopLevelFolders(ctx)
+		if err != nil {
+			log.Println(err)
+		}
+		folders, err := getAllFolders(ctx, tlf)
+		if err != nil {
+			log.Println(err)
+		}
+
+		projectIDs, err := getAllProjects(ctx, folders)
+		if err != nil {
+			log.Print(err)
+		}
+
+		allsas, err := getAllServiceAccounts(ctx, projectIDs)
+		if err != nil {
+			log.Println(err)
+		}
+
+		serviceAccountProjectTag(allsas, sa)
+
+	}
 	return nil
 }
 
@@ -530,7 +562,11 @@ func ProcessProjectEvent(ctx context.Context) error {
 			log.Println(err)
 		}
 
-		serviceAccountProjectTag(allsas, sa)
+		acc, err := serviceAccountProjectTag(allsas, sa)
+		if err != nil {
+			log.Println(err)
+		}
+		removeSusServiceAccounts(acc)
 	}
 	return nil
 }
