@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"google.golang.org/api/iam/v1"
@@ -37,8 +38,7 @@ readable and avoid confusion w/ similarly named vars (may be aided by separating
 
 var (
 	event     SetIAMPolicyEvent
-	folderIDs        = make(map[string]bool)
-	orgID     string = "218422761942"
+	folderIDs = make(map[string]bool)
 )
 
 // unmarshallMessage unmarshalles the Pub/Sub message into the SetIAMPolicy struct.
@@ -224,6 +224,7 @@ func getAncestorServiceAccounts(ctx context.Context, projects []string, susServi
 // search the top level folders under the org node and
 // append to a list of folderIDs
 func getTopLevelFolders(ctx context.Context) (map[string]bool, error) {
+	orgID := os.Getenv("ORGID")
 	log.Println("inside toplevelfolders()")
 	crms, err := crmv2.NewService(ctx)
 	folderSvc := crmv2.NewFoldersService(crms)
@@ -293,6 +294,7 @@ func getAllFolders(ctx context.Context, folderIDs map[string]bool) (map[string]b
 //getAllProjects appends the project IDs for all projects in GCP org to a []strings.
 func getAllProjects(ctx context.Context, folderIDs map[string]bool) ([]string, error) {
 	log.Println("inside getAllProjects()")
+	orgID := os.Getenv("ORGID")
 	var projectIDs []string
 	crms, err := crmv1.NewService(ctx)
 	if err != nil {
